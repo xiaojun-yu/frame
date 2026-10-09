@@ -49,6 +49,10 @@ MainWindow::MainWindow(QWidget *parent)
     // 调试窗口的数据发送到当前主窗口的 TCP 连接，不再临时创建另一个 MainWindow。
     connect(deb, &Deb::sendData,
             this, &MainWindow::sendDebugData);
+    // 网络回调只绑定一次；实际连接建立后继续使用同一组处理函数。
+    attachSocket(tcpSocket, false);
+    connect(tcpSocket, &QTcpSocket::connected,
+            this, &MainWindow::connected_Slot);
 
     //创建表一
     creatChart();
@@ -123,21 +127,131 @@ MainWindow::MainWindow(QWidget *parent)
 /*网络部分*/
 //检测是否有新连接进来
 void MainWindow::newConnection_Slot(){
-    tcpSocket = tcpServer->nextPendingConnection();
-    receiveBuffer.clear();
-    connect(tcpSocket, SIGNAL(readyRead()), this, SLOT(readyRead_Slot()));
-    connect(tcpSocket, SIGNAL(disconnected()), this, SLOT(disconnected_Slot()));
-    ui->connect_l->setStyleSheet("border-image: url(:/connect.png)");
-    qDebug() << "new connect";
+    // 一次 newConnection 通知期间可能已有多个连接排队，逐个接收。
+    while (tcpServer->hasPendingConnections()) {
+        QTcpSocket *socket = tcpServer->nextPendingConnection();
+        if (!socket)
+            continue;
+
+        serverClients.insert(socket);
+        attachSocket(socket, true);
+        ui->connect_l->setStyleSheet("border-image: url(:/connect.png)");
+        qDebug() << "new client:" << socket->peerAddress().toString()
+                 << ":" << socket->peerPort()
+                 << "active clients:" << serverClients.size();
+    }
 }
 
 //客户机连接
 void MainWindow::connected_Slot(){
     qDebug() << "connect to " << ui->ip_edi->text() << ":" << ui->port_edi->text().toUInt();
-    receiveBuffer.clear();
-    connect(tcpSocket,SIGNAL(readyRead()),this,SLOT(readyRead_Slot()));
     ui->connect_l->setStyleSheet("border-image: url(:/connect.png)");
-    connect(tcpSocket,SIGNAL(disconnected()),this,SLOT(disconnected_Slot()));
+}
+
+void MainWindow::attachSocket(QTcpSocket *socket, bool acceptedClient)
+{
+    if (!socket || receiveBuffers.contains(socket))
+        return;
+
+    receiveBuffers.insert(socket, QByteArray());
+    if (acceptedClient)
+        serverClients.insert(socket);
+
+    connect(socket, &QTcpSocket::readyRead, this,
+            [this, socket]() { processSocketData(socket); });
+    connect(socket, &QTcpSocket::disconnected, this,
+            [this, socket]() { handleSocketDisconnected(socket); });
+}
+
+void MainWindow::processSocketData(QTcpSocket *socket)
+{
+    auto it = receiveBuffers.find(socket);
+    if (it == receiveBuffers.end())
+        return;
+
+    it.value().append(socket->readAll());
+    constexpr qsizetype maxBufferedBytes = 64 * 1024;
+    if (it.value().size() > maxBufferedBytes
+        && !it.value().contains('\n')) {
+        qWarning() << "TCP frame exceeded buffer limit; disconnecting"
+                   << socket->peerAddress().toString();
+        socket->disconnectFromHost();
+        return;
+    }
+
+    // Each socket has its own byte buffer, so partial frames from clients cannot mix.
+    int newline = -1;
+    while ((newline = it.value().indexOf('\n')) >= 0) {
+        const QByteArray frame = it.value().left(newline).trimmed();
+        it.value().remove(0, newline + 1);
+        if (frame.isEmpty())
+            continue;
+
+        const QString command = QString::fromUtf8(frame);
+        qDebug() << "readyRead_Slot:" << command;
+        deb->DisplayData(command);
+        handleReceivedCommand(command);
+    }
+
+    if (it.value().size() > maxBufferedBytes) {
+        qWarning() << "TCP receive buffer exceeded limit; disconnecting"
+                   << socket->peerAddress().toString();
+        socket->disconnectFromHost();
+    }
+}
+
+void MainWindow::handleSocketDisconnected(QTcpSocket *socket)
+{
+    const bool wasServerClient = serverClients.remove(socket) > 0;
+    if (wasServerClient)
+        receiveBuffers.remove(socket);
+    else
+        receiveBuffers[socket].clear(); // retain client-mode socket for reconnection
+
+    qDebug() << "socket disconnected; active server clients:" << serverClients.size();
+    if (wasServerClient)
+        socket->deleteLater();
+
+    if ((MS && serverClients.isEmpty()) || (!MS && socket == tcpSocket))
+        ui->connect_l->setStyleSheet("border-image: url(:/discon.png)");
+}
+
+void MainWindow::closeServerClients()
+{
+    const auto clients = serverClients.values();
+    serverClients.clear();
+    for (QTcpSocket *socket : clients) {
+        receiveBuffers.remove(socket);
+        socket->disconnect(this);
+        socket->disconnectFromHost();
+        socket->deleteLater();
+    }
+}
+
+void MainWindow::sendNetworkData(const QByteArray &data)
+{
+    if (MS) {
+        int sentCount = 0;
+        const auto clients = serverClients.values();
+        for (QTcpSocket *socket : clients) {
+            if (socket && socket->state() == QAbstractSocket::ConnectedState
+                && socket->write(data) != -1) {
+                ++sentCount;
+            }
+        }
+        if (sentCount == 0)
+            qWarning() << "No connected client; message not sent:" << data.trimmed();
+        else
+            qDebug() << "Sent to" << sentCount << "client(s):" << data.trimmed();
+        return;
+    }
+
+    if (tcpSocket->state() != QAbstractSocket::ConnectedState) {
+        qWarning() << "TCP is not connected; message not sent:" << data.trimmed();
+        return;
+    }
+    if (tcpSocket->write(data) == -1)
+        qWarning() << "TCP send failed:" << tcpSocket->errorString();
 }
 
 //文本显示
@@ -336,6 +450,10 @@ void MainWindow::BackDataParsing(QString strBuf){
 
 MainWindow::~MainWindow()
 {
+    tcpServer->close();
+    closeServerClients();
+    tcpSocket->close();
+
     if (databaseThread && databaseThread->isRunning()) {
         QMetaObject::invokeMethod(databaseWorker, "shutdown",
                                   Qt::BlockingQueuedConnection);
@@ -350,36 +468,7 @@ MainWindow::~MainWindow()
 void MainWindow::sendDebugData(const QString &data)
 {
     const QByteArray frame = (data + QLatin1Char('\n')).toUtf8();
-    if (tcpSocket->state() != QAbstractSocket::ConnectedState) {
-        qWarning() << "调试数据未发送：TCP 尚未连接";
-        return;
-    }
-    if (tcpSocket->write(frame) == -1)
-        qWarning() << "调试数据发送失败：" << tcpSocket->errorString();
-}
-
-//收到的数据放入接受框并解析；按换行符区分完整消息。
-void MainWindow::readyRead_Slot()
-{
-    receiveBuffer += QString::fromUtf8(tcpSocket->readAll());
-    int newline = -1;
-    while ((newline = receiveBuffer.indexOf('\n')) >= 0) {
-        const QString command = receiveBuffer.left(newline).trimmed();
-        receiveBuffer.remove(0, newline + 1);
-        if (command.isEmpty())
-            continue;
-
-        qDebug() << "readyRead_Slot:" << command;
-        deb->DisplayData(command);
-        handleReceivedCommand(command);
-    }
-}
-
-void MainWindow::disconnected_Slot()
-{
-    receiveBuffer.clear();
-    tcpSocket->close();
-    ui->connect_l->setStyleSheet("border-image: url(:/discon.png)");
+    sendNetworkData(frame);
 }
 
 //创建chart
@@ -558,9 +647,8 @@ void MainWindow::ReData_Slot(){
             ui->relay->setIcon(QIcon(":/relay_off.png"));
             //tcpSocket->write("relay_off");
             ui->progressBar->setValue(100);
-            if (MS) {
-                tcpSocket->write("relay_off\n");
-            }
+            if (MS)
+                sendNetworkData("relay_off\n");
         }
       }
     else
@@ -577,6 +665,7 @@ void MainWindow::on_sermode_clicked()
     {
        //全关闭
        tcpServer->close();
+       closeServerClients();
        tcpSocket->close();
        //客户机
        if(MS){
@@ -620,7 +709,6 @@ void MainWindow::on_open_wifi_triggered()
         else//客户机
         {
             tcpSocket->connectToHost(ui->ip_edi->text(),ui->port_edi->text().toUInt());
-            connect(tcpSocket,SIGNAL(connected()),this,SLOT(connected_Slot()));
             qDebug() << "这是客户机";
         }
     }else{
@@ -630,6 +718,7 @@ void MainWindow::on_open_wifi_triggered()
         ui->open_wifi->setIcon(QIcon(":close.png"));
 
         tcpServer->close();
+        closeServerClients();
         tcpSocket->close();
     }
 }
@@ -642,11 +731,11 @@ void MainWindow::on_led_triggered()
 
     if(ledSw){
         ui->led->setIcon(QIcon(":/led_on.png"));
-         tcpSocket->write("led_on\n");
+         sendNetworkData("led_on\n");
     }
     else{
          ui->led->setIcon(QIcon(":/led_off.png"));
-          tcpSocket->write("led_off\n");
+          sendNetworkData("led_off\n");
     }
 
 }
@@ -673,7 +762,7 @@ void MainWindow::on_relay_triggered()
     }
 
     // 必须已经建立 TCP 连接
-    if (tcpSocket->state() != QAbstractSocket::ConnectedState) {
+    if (serverClients.isEmpty()) {
 
         QMessageBox::warning(
             this,
@@ -695,14 +784,14 @@ void MainWindow::on_relay_triggered()
             QString("relay_on:%1\n")
                 .arg(duration);
 
-        tcpSocket->write(command.toUtf8());
+        sendNetworkData(command.toUtf8());
 
         qDebug() << "主机发送：" << command;
     } else {
         ui->relay->setIcon(
             QIcon(":/relay_off.png"));
 
-        tcpSocket->write("relay_off\n");
+        sendNetworkData("relay_off\n");
 
         qDebug() << "主机发送：relay_off";
     }
@@ -716,12 +805,12 @@ void MainWindow::on_auto_hand_triggered()
     if(run_mode){
 
         ui->auto_hand->setIcon(QIcon(":/auto.png"));
-       tcpSocket->write("auto_mode\n");
+       sendNetworkData("auto_mode\n");
     }
     else{
         //手动
          ui->auto_hand->setIcon(QIcon(":/hand.png"));
-         tcpSocket->write("hand_mode\n");
+         sendNetworkData("hand_mode\n");
     }
 }
 //调出调试窗口
@@ -861,7 +950,7 @@ void MainWindow::on_set_yu_bt_clicked()
                    Entemp     + " " + "temp:"+ ui->temp_yu_la->text()+";"+
                    Enlight    + " " + "light:"+ui->light_yu_la->text();
 
-    tcpSocket->write((sendThrshold + QLatin1Char('\n')).toLocal8Bit());
+    sendNetworkData((sendThrshold + QLatin1Char('\n')).toLocal8Bit());
 
 }
 
@@ -875,7 +964,7 @@ void MainWindow::on_horizontalSlider_valueChanged(int value)
 //光强控制
 void MainWindow::on_set_light_bt_clicked()
 {
-   tcpSocket->write(("Pwm:" + QString::number(light_pwm) + QLatin1Char('\n')).toLocal8Bit());
+   sendNetworkData(("Pwm:" + QString::number(light_pwm) + QLatin1Char('\n')).toLocal8Bit());
 }
 
 

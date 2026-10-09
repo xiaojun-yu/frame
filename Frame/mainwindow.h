@@ -6,6 +6,9 @@
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QString>
+#include <QByteArray>
+#include <QHash>
+#include <QSet>
 #include "deb.h"
 #include "database.h"
 #include "databaseworker.h"
@@ -42,8 +45,6 @@ public:
     void ReData_Slot();
 
     void newConnection_Slot();
-    void readyRead_Slot();
-    void disconnected_Slot();
     void connected_Slot();
     void sendDebugData(const QString &data);
 
@@ -113,7 +114,13 @@ private:
     void BackDataParsing(QString strBuf);//数据解析
     void ToUpdata_Lab(QString Stemp,QString Shumi,QString Slight,QString Ssoil,QString Smq2,QString Srain);//更新至标签
     void handleReceivedCommand(const QString &command);
-    QString receiveBuffer;
+    void attachSocket(QTcpSocket *socket, bool acceptedClient);
+    void processSocketData(QTcpSocket *socket);
+    void handleSocketDisconnected(QTcpSocket *socket);
+    void closeServerClients();
+    void sendNetworkData(const QByteArray &data);
+    QHash<QTcpSocket *, QByteArray> receiveBuffers;
+    QSet<QTcpSocket *> serverClients;
 
     //定时器1
      QTimer *timer;
