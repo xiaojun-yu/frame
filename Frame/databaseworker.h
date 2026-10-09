@@ -13,7 +13,8 @@ public:
 
 public slots:
     void initialize();
-    void insertSensorData(double temp,
+    void insertSensorData(const QString &clientId,
+                          double temp,
                           double humi,
                           double light,
                           double soil,

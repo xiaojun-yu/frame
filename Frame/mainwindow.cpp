@@ -133,11 +133,29 @@ void MainWindow::newConnection_Slot(){
         if (!socket)
             continue;
 
+        QSet<int> usedClientIds;
+        for (int activeId : clientIds)
+            usedClientIds.insert(activeId);
+
+        int clientId = 1;
+        while (clientId <= 10000 && usedClientIds.contains(clientId))
+            ++clientId;
+
+        if (clientId > 10000) {
+            qWarning() << "客户端编号 1-10000 已用完，拒绝新连接";
+            socket->disconnectFromHost();
+            socket->deleteLater();
+            continue;
+        }
+
         serverClients.insert(socket);
+        clientIds.insert(socket, clientId);
         attachSocket(socket, true);
+        socket->write(QStringLiteral("client_id:%1\n").arg(clientId).toUtf8());
         ui->connect_l->setStyleSheet("border-image: url(:/connect.png)");
         qDebug() << "new client:" << socket->peerAddress().toString()
                  << ":" << socket->peerPort()
+                 << "client_id:" << clientId
                  << "active clients:" << serverClients.size();
     }
 }
@@ -190,7 +208,7 @@ void MainWindow::processSocketData(QTcpSocket *socket)
         const QString command = QString::fromUtf8(frame);
         qDebug() << "readyRead_Slot:" << command;
         deb->DisplayData(command);
-        handleReceivedCommand(command);
+        handleReceivedCommand(socket, command);
     }
 
     if (it.value().size() > maxBufferedBytes) {
@@ -208,7 +226,9 @@ void MainWindow::handleSocketDisconnected(QTcpSocket *socket)
     else
         receiveBuffers[socket].clear(); // retain client-mode socket for reconnection
 
-    qDebug() << "socket disconnected; active server clients:" << serverClients.size();
+    const int clientId = clientIds.take(socket);
+    qDebug() << "socket disconnected; client_id:" << clientId
+             << "active server clients:" << serverClients.size();
     if (wasServerClient)
         socket->deleteLater();
 
@@ -222,6 +242,7 @@ void MainWindow::closeServerClients()
     serverClients.clear();
     for (QTcpSocket *socket : clients) {
         receiveBuffers.remove(socket);
+        clientIds.remove(socket);
         socket->disconnect(this);
         socket->disconnectFromHost();
         socket->deleteLater();
@@ -266,7 +287,7 @@ void MainWindow::ToUpdata_Lab(QString Stemp,QString Shumi,QString Slight,QString
 
 }
 
-void MainWindow::handleReceivedCommand(const QString &command)
+void MainWindow::handleReceivedCommand(QTcpSocket *socket, const QString &command)
 {
     QString cmd = command.trimmed();
 
@@ -276,6 +297,14 @@ void MainWindow::handleReceivedCommand(const QString &command)
     }
 
     qDebug() << "收到命令：" << cmd;
+
+    if (cmd.startsWith("client_id:")) {
+        if (!MS && socket == tcpSocket) {
+            assignedClientId = cmd.mid(QStringLiteral("client_id:").size()).trimmed();
+            qDebug() << "服务器分配的 client_id:" << assignedClientId;
+        }
+        return;
+    }
 
     /*
      * 开启继电器。
@@ -379,7 +408,11 @@ void MainWindow::handleReceivedCommand(const QString &command)
 
         // 传感器数据由主机处理
         if (MS) {
-            BackDataParsing(cmd);
+            const auto clientIdIt = clientIds.constFind(socket);
+            const QString clientId = clientIdIt == clientIds.cend()
+                ? QStringLiteral("unknown")
+                : QString::number(clientIdIt.value());
+            BackDataParsing(cmd, clientId);
         }
 
         return;
@@ -412,7 +445,7 @@ void MainWindow::handleReceivedCommand(const QString &command)
 }
 
 //数据解析
-void MainWindow::BackDataParsing(QString strBuf){
+void MainWindow::BackDataParsing(const QString &strBuf, const QString &clientId){
 
     //查找是否为参数;  -1表示没有该子串
    if(strBuf.startsWith("Params")){
@@ -442,7 +475,7 @@ void MainWindow::BackDataParsing(QString strBuf){
        ToUpdata_Lab(str,st2,st3,st4,st5,st6);
 
        // 通过队列信号异步写入数据库，避免阻塞界面线程。
-        emit saveSensorData(temp_data, humi_data, light_data,
+        emit saveSensorData(clientId, temp_data, humi_data, light_data,
                             soil_data, mq2_data, rain_data);
 
    }

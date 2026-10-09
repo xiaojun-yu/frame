@@ -95,7 +95,8 @@ public:
     void on_data_triggered();
 
 signals:
-    void saveSensorData(double temp,
+    void saveSensorData(const QString &clientId,
+                        double temp,
                         double humi,
                         double light,
                         double soil,
@@ -111,9 +112,9 @@ private:
     void DisplayChart1();
     void DisplayChart2();
 
-    void BackDataParsing(QString strBuf);//数据解析
+    void BackDataParsing(const QString &strBuf, const QString &clientId);//数据解析
     void ToUpdata_Lab(QString Stemp,QString Shumi,QString Slight,QString Ssoil,QString Smq2,QString Srain);//更新至标签
-    void handleReceivedCommand(const QString &command);
+    void handleReceivedCommand(QTcpSocket *socket, const QString &command);
     void attachSocket(QTcpSocket *socket, bool acceptedClient);
     void processSocketData(QTcpSocket *socket);
     void handleSocketDisconnected(QTcpSocket *socket);
@@ -121,6 +122,8 @@ private:
     void sendNetworkData(const QByteArray &data);
     QHash<QTcpSocket *, QByteArray> receiveBuffers;
     QSet<QTcpSocket *> serverClients;
+    QHash<QTcpSocket *, int> clientIds;
+    QString assignedClientId;
 
     //定时器1
      QTimer *timer;
