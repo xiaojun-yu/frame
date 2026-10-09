@@ -1,0 +1,157 @@
+﻿#include "deb.h"
+#include "ui_deb.h"
+#include <QMessageBox>
+#include <string>
+
+//用来生成随机数
+#include <iostream>
+#include <ctime>
+#include <cstdlib>
+#include <iomanip>
+#include <random>
+
+Deb::Deb(QWidget *parent) :
+    QWidget(parent),
+    ui(new Ui::Deb)
+{
+    ui->setupUi(this);
+    setFixedSize(520,620);
+}
+
+Deb::~Deb()
+{
+    if(timer_simulate) {
+        timer_simulate->stop();
+        delete timer_simulate;
+        timer_simulate = nullptr;
+    }
+    delete ui;
+}
+
+
+void Deb::DisplayData(QString qstring){
+    ui->rec_edi->appendPlainText(qstring);
+}
+
+void Deb::closeEvent(QCloseEvent *event)
+{
+    if(timer_simulate) {
+        timer_simulate->stop();
+        delete timer_simulate;
+        timer_simulate = nullptr;
+        auto_simulate_running = false;
+    }
+}
+void Deb::on_exit_bt_clicked()
+{
+    this->close();
+}
+
+//清除接受框
+void Deb::on_clear_bt_clicked()
+{
+    ui->rec_edi->clear();
+}
+//清除发送框
+void Deb::on_pushButton_2_clicked()
+{
+    ui->send_edi->clear();
+}
+//发送
+void Deb::on_send_bt_clicked()
+{
+    const QString data = ui->send_edi->text();
+
+     QString str2 = "->" + data;
+     ui->rec_edi->appendPlainText(str2);
+     emit sendData(data);
+}
+
+void Deb::on_autoSimulation_clicked()
+{
+   //
+    if(!auto_simulate_running) {
+        auto_simulate_running = true;
+        //启动定时器
+        timer_simulate = new QTimer(this);
+        timer_simulate->start(2000);
+        connect(timer_simulate, SIGNAL(timeout()),this,SLOT(timer_simulate_slot()));
+        ui->autoSimulation->setText("停止模拟");
+    } else {
+        auto_simulate_running = false;
+        timer_simulate->stop();
+        delete timer_simulate;
+        timer_simulate = nullptr;
+        ui->autoSimulation->setText("开始模拟");
+    }
+}
+// 自定义一个简单的混合种子
+int customSeed() {
+    std::clock_t now = std::clock();
+    std::size_t address = reinterpret_cast<std::size_t>(&customSeed);
+    return static_cast<int>(now + address);
+}
+//double get_rand(int max) {
+
+////    std::srand(static_cast<unsigned int>(std::time(nullptr)));
+//    std::srand(customSeed());
+//    // 生成整数部分（0 - max
+//    int integerPart = std::rand() % max +1;
+
+//    // 生成小数部分（0 - 99），模拟两位小数
+//    int decimalPart = std::rand() % 100;
+
+//    double randomNumber = integerPart + static_cast<double>(decimalPart) / 100;
+
+//    std::cout << std::fixed << std::setprecision(2) << "生成的随机数是: " << randomNumber << std::endl;
+
+//    return randomNumber;
+//}
+
+double get_rand(int rand_num) {
+    std::mt19937 generator(rand_num);
+
+    std::uniform_int_distribution<int> distribution(0, 100);
+    int integerPart =distribution(generator);
+
+    int decimalPart =distribution(generator) %100;
+    double randomNumber = integerPart + static_cast<double>(decimalPart) / 100;
+    return randomNumber;
+}
+
+void Deb::timer_simulate_slot()
+{
+    // 模拟数据 这里先不用关注数据的正确性，能产生就行，具体正确性 大家可以去查阅去查阅对应参数的指标范围
+    double temp = get_rand(static_cast<unsigned int>(std::time(nullptr)) + 1);       //温度
+    double humi = get_rand(static_cast<unsigned int>(std::time(nullptr)) + 2);      //湿度
+    double light = get_rand(static_cast<unsigned int>(std::time(nullptr))+3);    //照度
+    double soil = get_rand(static_cast<unsigned int>(std::time(nullptr))+4);    //土壤湿度
+    double mq2 = get_rand(static_cast<unsigned int>(std::time(nullptr))+5);    //有害气体
+    double rain = get_rand(static_cast<unsigned int>(std::time(nullptr))+6);   //雨量
+
+    // 更新数据
+    ui->temp_la->setText(QString::number(temp, 'f', 2) + "");
+    ui->humi_la->setText(QString::number(humi, 'f', 2));
+    ui->light_la->setText(QString::number(light, 'f', 2));
+    ui->soil_la->setText(QString::number(soil, 'f', 2));
+    ui->mq2_la->setText(QString::number(mq2, 'f', 2));
+    ui->rain_la->setText(QString::number(rain, 'f', 2));
+
+    //更新数据到 buf里
+    //格式：Params{temp:39.3;humi:82.9;light:69.3;soil:38.3;mq2:22.2;rain:57.3;}
+
+    QString send_buf =  QString("Params{temp:%1;humi:%2;light:%3;soil:%4;mq2:%5;rain:%6;}")
+            .arg(QString::number(temp, 'f', 2))
+            .arg(QString::number(humi, 'f', 2))
+            .arg(QString::number(light, 'f', 2))
+            .arg(QString::number(soil, 'f', 2))
+            .arg(QString::number(mq2, 'f', 2))
+            .arg(QString::number(rain, 'f', 2));
+
+    QString  str = "->";
+    QString str2 = str.append(send_buf);
+    ui->rec_edi->appendPlainText(str2);
+    qDebug() << "timer_simulate_slot: " << send_buf;
+    emit sendData(send_buf);
+}
+

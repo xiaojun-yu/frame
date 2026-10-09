@@ -1,0 +1,10 @@
+debug/database.o
+debug/databaseworker.o
+debug/deb.o
+debug/main.o
+debug/mainwindow.o
+debug/qrc_picture.o
+debug/moc_database.o
+debug/moc_databaseworker.o
+debug/moc_deb.o
+debug/moc_mainwindow.o

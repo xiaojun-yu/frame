@@ -1,0 +1,10 @@
+release/database.o
+release/databaseworker.o
+release/deb.o
+release/main.o
+release/mainwindow.o
+release/qrc_picture.o
+release/moc_database.o
+release/moc_databaseworker.o
+release/moc_deb.o
+release/moc_mainwindow.o
