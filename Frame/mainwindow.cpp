@@ -53,6 +53,15 @@ MainWindow::MainWindow(QWidget *parent)
     attachSocket(tcpSocket, false);
     connect(tcpSocket, &QTcpSocket::connected,
             this, &MainWindow::connected_Slot);
+    reconnectTimer = new QTimer(this);
+    reconnectTimer->setSingleShot(true);
+    connect(reconnectTimer, &QTimer::timeout,
+            this, &MainWindow::attemptClientReconnect);
+    connect(tcpSocket, &QTcpSocket::errorOccurred, this,
+            [this](QAbstractSocket::SocketError) {
+                // 初次连接失败时也会触发错误信号；若仍处于客户机联网状态，安排重试。
+                scheduleClientReconnect();
+            });
 
     //创建表一
     creatChart();
@@ -162,8 +171,34 @@ void MainWindow::newConnection_Slot(){
 
 //客户机连接
 void MainWindow::connected_Slot(){
+    if (reconnectTimer)
+        reconnectTimer->stop();
+    assignedClientId.clear(); // 每次重新连接后等待服务器重新分配会话 ID。
     qDebug() << "connect to " << ui->ip_edi->text() << ":" << ui->port_edi->text().toUInt();
     ui->connect_l->setStyleSheet("border-image: url(:/connect.png)");
+}
+
+void MainWindow::scheduleClientReconnect()
+{
+    if (!flag_Sw || MS || !reconnectTimer
+        || tcpSocket->state() != QAbstractSocket::UnconnectedState
+        || reconnectTimer->isActive()) {
+        return;
+    }
+
+    qWarning() << "客户机连接断开，将在 5 秒后重试连接";
+    reconnectTimer->start(5000);
+}
+
+void MainWindow::attemptClientReconnect()
+{
+    if (!flag_Sw || MS || tcpSocket->state() != QAbstractSocket::UnconnectedState)
+        return;
+
+    const QString host = ui->ip_edi->text().trimmed();
+    const quint16 port = static_cast<quint16>(ui->port_edi->text().toUInt());
+    qDebug() << "客户机正在重连：" << host << ":" << port;
+    tcpSocket->connectToHost(host, port);
 }
 
 void MainWindow::attachSocket(QTcpSocket *socket, bool acceptedClient)
@@ -234,6 +269,9 @@ void MainWindow::handleSocketDisconnected(QTcpSocket *socket)
 
     if ((MS && serverClients.isEmpty()) || (!MS && socket == tcpSocket))
         ui->connect_l->setStyleSheet("border-image: url(:/discon.png)");
+
+    if (!wasServerClient && socket == tcpSocket)
+        scheduleClientReconnect();
 }
 
 void MainWindow::closeServerClients()
@@ -741,6 +779,8 @@ void MainWindow::on_open_wifi_triggered()
         }
         else//客户机
         {
+            if (reconnectTimer)
+                reconnectTimer->stop();
             tcpSocket->connectToHost(ui->ip_edi->text(),ui->port_edi->text().toUInt());
             qDebug() << "这是客户机";
         }
@@ -749,6 +789,9 @@ void MainWindow::on_open_wifi_triggered()
         //ui->switch_bt->setStyleSheet("border-image: url(:/close.png);");
         ui->wifi_l->setStyleSheet("border-image: url(:/wifi_off.png);");
         ui->open_wifi->setIcon(QIcon(":close.png"));
+
+        if (reconnectTimer)
+            reconnectTimer->stop();
 
         tcpServer->close();
         closeServerClients();

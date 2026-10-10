@@ -9,6 +9,7 @@
 #include <QByteArray>
 #include <QHash>
 #include <QSet>
+#include <QTimer>
 #include "deb.h"
 #include "database.h"
 #include "databaseworker.h"
@@ -46,6 +47,8 @@ public:
 
     void newConnection_Slot();
     void connected_Slot();
+    void attemptClientReconnect();
+    void scheduleClientReconnect();
     void sendDebugData(const QString &data);
 
 
@@ -124,6 +127,7 @@ private:
     QSet<QTcpSocket *> serverClients;
     QHash<QTcpSocket *, int> clientIds;
     QString assignedClientId;
+    QTimer *reconnectTimer = nullptr;
 
     //定时器1
      QTimer *timer;
