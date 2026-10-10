@@ -128,6 +128,8 @@ private:
     QHash<QTcpSocket *, int> clientIds;
     QString assignedClientId;
     QTimer *reconnectTimer = nullptr;
+    QTimer *heartbeatSendTimer = nullptr;
+    QTimer *heartbeatTimeoutTimer = nullptr;
 
     //定时器1
      QTimer *timer;

@@ -63,6 +63,30 @@ MainWindow::MainWindow(QWidget *parent)
                 scheduleClientReconnect();
             });
 
+    heartbeatSendTimer = new QTimer(this);
+    heartbeatSendTimer->setInterval(3000);
+    connect(heartbeatSendTimer, &QTimer::timeout, this, [this]() {
+        if (!MS && flag_Sw
+            && tcpSocket->state() == QAbstractSocket::ConnectedState) {
+            if (tcpSocket->write("PING\n") == -1) {
+                qWarning() << "发送心跳失败：" << tcpSocket->errorString();
+                tcpSocket->abort();
+            }else {
+                qDebug() << "客户机发送 PING";
+            }
+        }
+    });
+
+    heartbeatTimeoutTimer = new QTimer(this);
+    heartbeatTimeoutTimer->setSingleShot(true);
+    connect(heartbeatTimeoutTimer, &QTimer::timeout, this, [this]() {
+        if (!MS && flag_Sw
+            && tcpSocket->state() == QAbstractSocket::ConnectedState) {
+            qWarning() << "10 秒内未收到主机心跳回应，断开并启动自动重连";
+            tcpSocket->abort();
+        }
+    });
+
     //创建表一
     creatChart();
 
@@ -174,6 +198,10 @@ void MainWindow::connected_Slot(){
     if (reconnectTimer)
         reconnectTimer->stop();
     assignedClientId.clear(); // 每次重新连接后等待服务器重新分配会话 ID。
+    if (!MS && flag_Sw) {
+        heartbeatTimeoutTimer->start(10000);
+        heartbeatSendTimer->start();
+    }
     qDebug() << "connect to " << ui->ip_edi->text() << ":" << ui->port_edi->text().toUInt();
     ui->connect_l->setStyleSheet("border-image: url(:/connect.png)");
 }
@@ -241,8 +269,11 @@ void MainWindow::processSocketData(QTcpSocket *socket)
             continue;
 
         const QString command = QString::fromUtf8(frame);
-        qDebug() << "readyRead_Slot:" << command;
-        deb->DisplayData(command);
+        if (command != QStringLiteral("PING")
+            && command != QStringLiteral("PONG")) {
+            qDebug() << "readyRead_Slot:" << command;
+            deb->DisplayData(command);
+        }
         handleReceivedCommand(socket, command);
     }
 
@@ -255,6 +286,11 @@ void MainWindow::processSocketData(QTcpSocket *socket)
 
 void MainWindow::handleSocketDisconnected(QTcpSocket *socket)
 {
+    if (socket == tcpSocket) {
+        heartbeatSendTimer->stop();
+        heartbeatTimeoutTimer->stop();
+    }
+
     const bool wasServerClient = serverClients.remove(socket) > 0;
     if (wasServerClient)
         receiveBuffers.remove(socket);
@@ -331,6 +367,25 @@ void MainWindow::handleReceivedCommand(QTcpSocket *socket, const QString &comman
 
     // 忽略空消息
     if (cmd.isEmpty()) {
+        return;
+    }
+
+    // 心跳是连接保活消息，不进入传感器解析或数据库写入。
+    if (cmd == QStringLiteral("PING")) {
+        if (socket->state() == QAbstractSocket::ConnectedState
+            && socket->write("PONG\n") == -1) {
+            qWarning() << "回复心跳失败：" << socket->errorString();
+        }else
+            qDebug() << "主机发送 PONG";
+        return;
+    }
+
+    if (cmd == QStringLiteral("PONG")) {
+        if (!MS && socket == tcpSocket && flag_Sw){
+            qDebug() << "客户机收到 PONG";
+            heartbeatTimeoutTimer->start(10000);
+        }
+
         return;
     }
 
@@ -792,6 +847,8 @@ void MainWindow::on_open_wifi_triggered()
 
         if (reconnectTimer)
             reconnectTimer->stop();
+        heartbeatSendTimer->stop();
+        heartbeatTimeoutTimer->stop();
 
         tcpServer->close();
         closeServerClients();
