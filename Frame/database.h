@@ -49,6 +49,8 @@ private slots:
 
     void on_clear_bt_clicked();
 
+    void on_export_result_bt_clicked();
+
 private:
     Ui::database *ui;
 };

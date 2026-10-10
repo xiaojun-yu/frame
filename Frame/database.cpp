@@ -4,6 +4,10 @@
 #include <QMessageBox>
 #include <QDebug>
 #include <QSqlError>
+#include <QFileDialog>
+#include <QFile>
+#include <QTextStream>
+#include <QStringConverter>
 
 database::database(QWidget *parent) :
     QWidget(parent),
@@ -67,7 +71,6 @@ database::database(QWidget *parent) :
 //     double data[6] = {1, 2.2, 3, 4,5, 6}; //只是用来测试数据用的
 //     insertData(data);
 }
-
 
 void database::SelectAllPushTableData(){
     tableModel = new QSqlQueryModel;//定义一个数据库模型，指定父对象
@@ -252,4 +255,78 @@ void database::on_clear_bt_clicked()
 {
     clearDBTable();
     SelectAllPushTableData();
+}
+
+void database::on_export_result_bt_clicked()
+{
+    if (!tableModel) {
+        QMessageBox::warning(this, "导出失败", "当前没有可导出的查询结果。");
+        return;
+    }
+
+    if (tableModel->lastError().isValid()) {
+        QMessageBox::warning(this, "导出失败",
+                             "当前查询存在错误：\n" + tableModel->lastError().text());
+        return;
+    }
+
+    // QSqlQueryModel 可能按需分批取数；导出前确保取完当前查询的全部结果。
+    while (tableModel->canFetchMore())
+        tableModel->fetchMore();
+
+    const int rowCount = tableModel->rowCount();
+    const int columnCount = tableModel->columnCount();
+    if (rowCount == 0 || columnCount == 0) {
+        QMessageBox::information(this, "没有数据", "当前查询没有可导出的记录。");
+        return;
+    }
+
+    const QString suggestedName = QString("qtdata_%1.csv")
+        .arg(QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss"));
+    QString fileName = QFileDialog::getSaveFileName(
+        this, "导出当前查询结果", suggestedName, "CSV 文件 (*.csv)");
+    if (fileName.isEmpty())
+        return;
+    if (!fileName.endsWith(".csv", Qt::CaseInsensitive))
+        fileName += ".csv";
+
+    QFile file(fileName);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        QMessageBox::warning(this, "导出失败",
+                             "无法创建文件：\n" + file.errorString());
+        return;
+    }
+
+    // UTF-8 BOM 便于 Windows Excel 正确识别中文。
+    file.write("\xEF\xBB\xBF");
+    QTextStream out(&file);
+    out.setEncoding(QStringConverter::Utf8);
+
+    const auto csvField = [](QString value) {
+        value.replace('"', "\"\"");
+        return "\"" + value + "\"";
+    };
+
+    QStringList fields;
+    fields.reserve(columnCount);
+    for (int column = 0; column < columnCount; ++column)
+        fields.append(csvField(tableModel->headerData(column, Qt::Horizontal).toString()));
+    out << fields.join(',') << '\n';
+
+    for (int row = 0; row < rowCount; ++row) {
+        fields.clear();
+        for (int column = 0; column < columnCount; ++column)
+            fields.append(csvField(tableModel->data(tableModel->index(row, column)).toString()));
+        out << fields.join(',') << '\n';
+    }
+
+    out.flush();
+    if (out.status() != QTextStream::Ok || file.error() != QFileDevice::NoError) {
+        QMessageBox::warning(this, "导出失败",
+                             "写入 CSV 时发生错误：\n" + file.errorString());
+        return;
+    }
+
+    QMessageBox::information(this, "导出成功",
+                             QString("已导出 %1 条记录到：\n%2").arg(rowCount).arg(fileName));
 }
